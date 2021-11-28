@@ -37,7 +37,6 @@ static std::string to_hex(std::vector<char> vec) {
     return res;
 }
 
-
 static CK_FUNCTION_LIST_PTR get_function_list() {
     SECMODModuleList* mlist = SECMOD_GetDefaultModuleList();
     SECMODModule* mod = nullptr;
@@ -82,17 +81,7 @@ static CK_ATTRIBUTE create_attr(CK_ATTRIBUTE_TYPE type, T* value_ptr, size_t val
     return attr;
 }
 
-static void generate_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
-    //auto iv = std::vector<char>();
-    //iv.resize(16);
-    //for (char i = 0; i < 16; i++) {
-    //    iv.push_back(i);
-    //}
-    //CK_MECHANISM mech;
-    //std::memset(std::addressof(mech), '\0', sizeof(mech));
-    //mech.mechanism = CKM_AES_CBC_PAD;
-    //mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
-
+static CK_OBJECT_HANDLE generate_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
     CK_MECHANISM mech;
     std::memset(std::addressof(mech), '\0', sizeof(mech));
     mech.mechanism = CKM_AES_KEY_GEN;
@@ -106,12 +95,84 @@ static void generate_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
     CK_RV err_gen = fl->C_GenerateKey(session, std::addressof(mech), 
             templ.data(), static_cast<CK_ULONG>(templ.size()), std::addressof(key));
     assert(CKR_OK == err_gen);
+    return key;
 }
 
-static void encrypt() {
+static std::vector<char> create_iv() {
+    auto iv = std::vector<char>();
+    iv.resize(16);
+    for (char i = 0; i < 16; i++) {
+        iv.push_back(i);
+    }
+    return iv;
 }
 
-static void decrypt() {
+static std::vector<char> encrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE key, std::vector<char>& plain) {
+    auto iv = create_iv();
+
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_AES_CBC_PAD;
+    mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
+
+    CK_RV err_init = fl->C_EncryptInit(session, std::addressof(mech), key);
+    assert(CKR_OK == err_init);
+    
+    auto enc = std::vector<char>();
+    enc.resize(16 + plain.size());
+    CK_ULONG enc_upd_len = static_cast<CK_ULONG>(enc.size());
+    CK_RV err_update = fl->C_EncryptUpdate(
+            session,
+            reinterpret_cast<CK_BYTE_PTR>(plain.data()),
+            static_cast<CK_ULONG>(plain.size()),
+            reinterpret_cast<CK_BYTE_PTR>(enc.data()),
+            std::addressof(enc_upd_len));
+    assert(CKR_OK == err_update);
+
+    CK_ULONG enc_final_len = static_cast<CK_ULONG>(enc.size() - static_cast<size_t>(enc_upd_len));
+    CK_RV err_final = fl->C_EncryptFinal(
+            session,
+            reinterpret_cast<CK_BYTE_PTR>(enc.data() + static_cast<size_t>(enc_upd_len)),
+            std::addressof(enc_final_len));
+    assert(CKR_OK == err_final);
+
+    enc.resize(static_cast<size_t>(enc_final_len));
+    return enc;
+}
+
+static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE key, std::vector<char>& enc) {
+    auto iv = create_iv();
+
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_AES_CBC_PAD;
+    mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
+
+    CK_RV err_init = fl->C_DecryptInit(session, std::addressof(mech), key);
+    assert(CKR_OK == err_init);
+
+    auto plain = std::vector<char>();
+    plain.resize(enc.size());
+    CK_ULONG plain_upd_len = static_cast<CK_ULONG>(plain.size());
+    CK_RV err_update = fl->C_DecryptUpdate(
+            session,
+            reinterpret_cast<CK_BYTE_PTR>(enc.data()),
+            static_cast<CK_ULONG>(enc.size()),
+            reinterpret_cast<CK_BYTE_PTR>(plain.data()),
+            std::addressof(plain_upd_len));
+    assert(CKR_OK == err_update);
+
+    CK_ULONG plain_final_len = static_cast<CK_ULONG>(plain.size() - static_cast<size_t>(plain_upd_len));
+    CK_RV err_final = fl->C_DecryptFinal(
+            session,
+            reinterpret_cast<CK_BYTE_PTR>(plain.data() + static_cast<size_t>(plain_upd_len)),
+            std::addressof(plain_final_len));
+    assert(CKR_OK == err_final);
+
+    plain.resize(static_cast<size_t>(plain_final_len));
+    return plain;
 }
 
 int main(int argc, char** argv) {
@@ -144,7 +205,16 @@ int main(int argc, char** argv) {
     digest_example(fl, session);
 
     // gen key
-    generate_key(fl, session);
+    auto key = generate_key(fl, session);
+
+    // encrypt
+    std::vector<char> plain = {'f', 'o', 'o', 'b', 'a', 'r'};
+    auto enc = encrypt(fl, session, key, plain);
+    //std::cout << to_hex(enc) << std::endl;
+
+    // decrypt
+    auto dec = decrypt(fl, session, key, enc);
+    assert("foobar" == std::string(dec.data(), dec.size()));
 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
