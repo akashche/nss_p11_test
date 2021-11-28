@@ -21,7 +21,9 @@
 
 static CK_OBJECT_CLASS secret_key_class = CKO_SECRET_KEY; 
 static CK_KEY_TYPE aes_key_type = CKK_AES;
+static CK_KEY_TYPE generic_secret_type = CKK_GENERIC_SECRET;
 static CK_ULONG aes_256_bytes = 256 >> 3;
+static CK_BBOOL sign_true = CK_TRUE;
 
 const std::array<char, 16> symbols = {
     {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
@@ -137,7 +139,7 @@ static std::vector<char> encrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
             std::addressof(enc_final_len));
     assert(CKR_OK == err_final);
 
-    enc.resize(static_cast<size_t>(enc_final_len));
+    enc.resize(static_cast<size_t>(enc_upd_len + enc_final_len));
     return enc;
 }
 
@@ -171,8 +173,39 @@ static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
             std::addressof(plain_final_len));
     assert(CKR_OK == err_final);
 
-    plain.resize(static_cast<size_t>(plain_final_len));
+    plain.resize(static_cast<size_t>(plain_upd_len + plain_final_len));
     return plain;
+}
+
+static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key) {
+    auto enc_key = encrypt(fl, session, import_key, plain_key);
+
+    auto iv = create_iv();
+
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_AES_CBC_PAD;
+    mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
+
+    auto templ = std::vector<CK_ATTRIBUTE>();
+    templ.emplace_back(create_attr(CKA_CLASS, std::addressof(secret_key_class), sizeof(secret_key_class)));
+    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(generic_secret_type), sizeof(generic_secret_type)));
+    templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
+
+    CK_OBJECT_HANDLE key_hadle = -1;
+    CK_RV err_unwrap = fl->C_UnwrapKey(
+            session,
+            std::addressof(mech),
+            import_key,
+            reinterpret_cast<CK_BYTE_PTR>(enc_key.data()),
+            static_cast<CK_ULONG>(enc_key.size()),
+            templ.data(),
+            static_cast<CK_ULONG>(templ.size()),
+            std::addressof(key_hadle));
+    assert(CKR_OK == err_unwrap);
+
+    return key_hadle;
 }
 
 int main(int argc, char** argv) {
@@ -206,15 +239,21 @@ int main(int argc, char** argv) {
 
     // gen key
     auto key = generate_key(fl, session);
+    assert(key > 0);
 
     // encrypt
     std::vector<char> plain = {'f', 'o', 'o', 'b', 'a', 'r'};
     auto enc = encrypt(fl, session, key, plain);
-    //std::cout << to_hex(enc) << std::endl;
 
     // decrypt
     auto dec = decrypt(fl, session, key, enc);
     assert("foobar" == std::string(dec.data(), dec.size()));
+
+    // import
+    auto empty_key = std::vector<char>();
+    empty_key.resize(48);
+    auto imported_key = import_secret(fl, session, key, empty_key);
+    assert(imported_key > 0);
 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
