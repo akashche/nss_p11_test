@@ -111,6 +111,7 @@ static std::vector<char> create_iv() {
 
 static std::vector<char> encrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
         CK_OBJECT_HANDLE key, std::vector<char>& plain) {
+
     auto iv = create_iv();
 
     CK_MECHANISM mech;
@@ -145,6 +146,7 @@ static std::vector<char> encrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
 
 static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
         CK_OBJECT_HANDLE key, std::vector<char>& enc) {
+
     auto iv = create_iv();
 
     CK_MECHANISM mech;
@@ -179,6 +181,7 @@ static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
 
 static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
         CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key) {
+
     auto enc_key = encrypt(fl, session, import_key, plain_key);
 
     auto iv = create_iv();
@@ -206,6 +209,32 @@ static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE
     assert(CKR_OK == err_unwrap);
 
     return key_hadle;
+}
+
+static std::vector<char> export_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE export_key, CK_OBJECT_HANDLE key_handle) {
+
+    auto iv = create_iv();
+
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_AES_CBC_PAD;
+    mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
+
+    auto enc_key = std::vector<char>();
+    enc_key.resize(128);
+    CK_ULONG len = static_cast<CK_ULONG>(enc_key.size());
+    CK_RV err_wrap = fl->C_WrapKey(
+            session,
+            std::addressof(mech),
+            export_key,
+            key_handle,
+            reinterpret_cast<CK_BYTE_PTR>(enc_key.data()),
+            std::addressof(len));
+    assert(CKR_OK == err_wrap);
+    enc_key.resize(static_cast<size_t>(len));
+
+    return decrypt(fl, session, export_key, enc_key);
 }
 
 int main(int argc, char** argv) {
@@ -250,10 +279,16 @@ int main(int argc, char** argv) {
     assert("foobar" == std::string(dec.data(), dec.size()));
 
     // import
-    auto empty_key = std::vector<char>();
-    empty_key.resize(48);
-    auto imported_key = import_secret(fl, session, key, empty_key);
+    auto plain_key = std::vector<char>();
+    plain_key.resize(48);
+    plain_key[42] = 42;
+    auto imported_key = import_secret(fl, session, key, plain_key);
     assert(imported_key > 0);
+
+    // export
+    auto exported_key = export_secret(fl, session, key, imported_key);
+    //std::cout << to_hex(exported_key) << std::endl;
+    assert(exported_key == plain_key);
 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
