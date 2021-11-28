@@ -8,10 +8,9 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
-#include <iomanip>
+#include <array>
 #include <iostream>
 #include <string>
-#include <sstream>
 #include <vector>
 
 #include <nss.h>
@@ -19,6 +18,10 @@
 #include <secmod.h>
 
 #define FIPS_SLOT_ID 3
+
+static CK_OBJECT_CLASS secret_key_class = CKO_SECRET_KEY; 
+static CK_KEY_TYPE aes_key_type = CKK_AES;
+static CK_ULONG aes_256_bytes = 256 >> 3;
 
 const std::array<char, 16> symbols = {
     {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
@@ -69,6 +72,48 @@ static void digest_example(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
     assert("c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2" == to_hex(digest));
 }
 
+template <typename T>
+static CK_ATTRIBUTE create_attr(CK_ATTRIBUTE_TYPE type, T* value_ptr, size_t value_len) {
+    CK_ATTRIBUTE attr;
+    std::memset(std::addressof(attr), '\0', sizeof(attr));
+    attr.type = type;
+    attr.pValue = static_cast<CK_VOID_PTR>(value_ptr);
+    attr.ulValueLen = static_cast<CK_ULONG>(value_len);
+    return attr;
+}
+
+static void generate_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
+    //auto iv = std::vector<char>();
+    //iv.resize(16);
+    //for (char i = 0; i < 16; i++) {
+    //    iv.push_back(i);
+    //}
+    //CK_MECHANISM mech;
+    //std::memset(std::addressof(mech), '\0', sizeof(mech));
+    //mech.mechanism = CKM_AES_CBC_PAD;
+    //mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
+
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_AES_KEY_GEN;
+
+    auto templ = std::vector<CK_ATTRIBUTE>();
+    templ.emplace_back(create_attr(CKA_CLASS, std::addressof(secret_key_class), sizeof(secret_key_class)));
+    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(aes_key_type), sizeof(aes_key_type)));
+    templ.emplace_back(create_attr(CKA_VALUE_LEN, std::addressof(aes_256_bytes), sizeof(aes_256_bytes)));
+
+    CK_OBJECT_HANDLE key = -1;
+    CK_RV err_gen = fl->C_GenerateKey(session, std::addressof(mech), 
+            templ.data(), static_cast<CK_ULONG>(templ.size()), std::addressof(key));
+    assert(CKR_OK == err_gen);
+}
+
+static void encrypt() {
+}
+
+static void decrypt() {
+}
+
 int main(int argc, char** argv) {
 
     // NSS init
@@ -97,6 +142,9 @@ int main(int argc, char** argv) {
 
     // check digest
     digest_example(fl, session);
+
+    // gen key
+    generate_key(fl, session);
 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
