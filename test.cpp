@@ -180,7 +180,7 @@ static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
 }
 
 static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
-        CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key) {
+        CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key, CK_KEY_TYPE& secret_type) {
 
     auto enc_key = encrypt(fl, session, import_key, plain_key);
 
@@ -193,7 +193,7 @@ static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE
 
     auto templ = std::vector<CK_ATTRIBUTE>();
     templ.emplace_back(create_attr(CKA_CLASS, std::addressof(secret_key_class), sizeof(secret_key_class)));
-    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(generic_secret_type), sizeof(generic_secret_type)));
+    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(secret_type), sizeof(secret_type)));
     templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
 
     CK_OBJECT_HANDLE key_hadle = -1;
@@ -278,17 +278,25 @@ int main(int argc, char** argv) {
     auto dec = decrypt(fl, session, key, enc);
     assert("foobar" == std::string(dec.data(), dec.size()));
 
-    // import
+    // import generic secret
     auto plain_key = std::vector<char>();
     plain_key.resize(48);
     plain_key[42] = 42;
-    auto imported_key = import_secret(fl, session, key, plain_key);
+    auto imported_key = import_secret(fl, session, key, plain_key, generic_secret_type);
     assert(imported_key > 0);
+
+    // import aes
+    auto plain_aes = std::vector<char>();
+    plain_aes.resize(32);
+    plain_aes[24] = 42;
+    auto imported_aes = import_secret(fl, session, key, plain_aes, aes_key_type);
+    assert(imported_aes > 0);
 
     // export
     auto exported_key = export_secret(fl, session, key, imported_key);
-    //std::cout << to_hex(exported_key) << std::endl;
     assert(exported_key == plain_key);
+    auto exported_aes = export_secret(fl, session, key, imported_aes);
+    assert(exported_aes == plain_aes);
 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
