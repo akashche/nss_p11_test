@@ -10,8 +10,10 @@ target_compile_options ( ${PROJECT_NAME} PRIVATE
 
 target_include_directories ( ${PROJECT_NAME} PRIVATE
     /usr/include/nspr4 
-    /usr/include/nss3 )
+    /usr/include/nss3
+    /usr/include/botan-2 )
 
 target_link_libraries ( ${PROJECT_NAME} PRIVATE
     nss3
-    softokn3 )
+    softokn3
+    botan-2 )

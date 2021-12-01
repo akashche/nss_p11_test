@@ -17,11 +17,18 @@
 #include <pkcs11.h>
 #include <secmod.h>
 
+#include <botan/auto_rng.h>
+#include <botan/data_src.h>
+#include <botan/pkcs8.h>
+#include <botan/rsa.h>
+
 #define FIPS_SLOT_ID 3
 
 static CK_OBJECT_CLASS secret_key_class = CKO_SECRET_KEY; 
+static CK_OBJECT_CLASS private_key_class = CKO_PRIVATE_KEY; 
 static CK_KEY_TYPE aes_key_type = CKK_AES;
 static CK_KEY_TYPE generic_secret_type = CKK_GENERIC_SECRET;
+static CK_KEY_TYPE rsa_key_type = CKK_RSA;
 static CK_ULONG aes_256_bytes = 256 >> 3;
 static CK_BBOOL sign_true = CK_TRUE;
 
@@ -179,8 +186,9 @@ static std::vector<char> decrypt(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE sess
     return plain;
 }
 
-static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
-        CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key, CK_KEY_TYPE& secret_type) {
+static CK_OBJECT_HANDLE import_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE import_key, std::vector<char>& plain_key, 
+        CK_OBJECT_CLASS& imp_key_class, CK_KEY_TYPE& imp_key_type) {
 
     auto enc_key = encrypt(fl, session, import_key, plain_key);
 
@@ -192,8 +200,8 @@ static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE
     mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
 
     auto templ = std::vector<CK_ATTRIBUTE>();
-    templ.emplace_back(create_attr(CKA_CLASS, std::addressof(secret_key_class), sizeof(secret_key_class)));
-    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(secret_type), sizeof(secret_type)));
+    templ.emplace_back(create_attr(CKA_CLASS, std::addressof(imp_key_class), sizeof(imp_key_class)));
+    templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(imp_key_type), sizeof(imp_key_type)));
     templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
 
     CK_OBJECT_HANDLE key_hadle = -1;
@@ -211,7 +219,7 @@ static CK_OBJECT_HANDLE import_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE
     return key_hadle;
 }
 
-static std::vector<char> export_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+static std::vector<char> export_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
         CK_OBJECT_HANDLE export_key, CK_OBJECT_HANDLE key_handle) {
 
     auto iv = create_iv();
@@ -222,7 +230,7 @@ static std::vector<char> export_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDL
     mech.pParameter = static_cast<CK_VOID_PTR>(iv.data());
 
     auto enc_key = std::vector<char>();
-    enc_key.resize(128);
+    enc_key.resize(4096);
     CK_ULONG len = static_cast<CK_ULONG>(enc_key.size());
     CK_RV err_wrap = fl->C_WrapKey(
             session,
@@ -235,6 +243,26 @@ static std::vector<char> export_secret(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDL
     enc_key.resize(static_cast<size_t>(len));
 
     return decrypt(fl, session, export_key, enc_key);
+}
+
+static std::vector<char> generate_rsa(size_t size_bits) {
+    Botan::AutoSeeded_RNG rng;
+    Botan::RSA_PrivateKey key(rng, size_bits);
+    auto sec_vec = Botan::PKCS8::BER_encode(key);
+    auto vec = Botan::unlock(sec_vec);
+    auto res = std::vector<char>();
+    res.resize(vec.size());
+    std::memcpy(res.data(), vec.data(), vec.size());
+    return res;
+}
+
+static std::string stringify_rsa(const std::vector<char>& rsa_key) {
+    auto vec = std::vector<uint8_t>();
+    vec.resize(rsa_key.size());
+    std::memcpy(vec.data(), rsa_key.data(), rsa_key.size());
+    Botan::DataSource_Memory mem(vec);
+    auto key = Botan::PKCS8::load_key(mem);
+    return Botan::PKCS8::PEM_encode(*key);
 }
 
 int main(int argc, char** argv) {
@@ -266,38 +294,56 @@ int main(int argc, char** argv) {
     // check digest
     digest_example(fl, session);
 
-    // gen key
-    auto key = generate_key(fl, session);
-    assert(key > 0);
+    // gen wrap/unwrap key
+    auto wrap_key = generate_key(fl, session);
+    assert(wrap_key > 0);
 
-    // encrypt
-    std::vector<char> plain = {'f', 'o', 'o', 'b', 'a', 'r'};
-    auto enc = encrypt(fl, session, key, plain);
+    {
+        // encrypt
+        std::vector<char> plain = {'f', 'o', 'o', 'b', 'a', 'r'};
+        auto enc = encrypt(fl, session, wrap_key, plain);
 
-    // decrypt
-    auto dec = decrypt(fl, session, key, enc);
-    assert("foobar" == std::string(dec.data(), dec.size()));
+        // decrypt
+        auto dec = decrypt(fl, session, wrap_key, enc);
+        assert("foobar" == std::string(dec.data(), dec.size()));
+    }
 
-    // import generic secret
-    auto plain_key = std::vector<char>();
-    plain_key.resize(48);
-    plain_key[42] = 42;
-    auto imported_key = import_secret(fl, session, key, plain_key, generic_secret_type);
-    assert(imported_key > 0);
+    {
+        // import generic secret
+        auto plain_key = std::vector<char>();
+        plain_key.resize(48);
+        plain_key[42] = 42;
+        auto imported_key = import_key(fl, session, wrap_key, plain_key, secret_key_class, generic_secret_type);
+        assert(imported_key > 0);
+        // export
+        auto exported_key = export_key(fl, session, wrap_key, imported_key);
+        assert(exported_key == plain_key);
+    }
 
-    // import aes
-    auto plain_aes = std::vector<char>();
-    plain_aes.resize(32);
-    plain_aes[24] = 42;
-    auto imported_aes = import_secret(fl, session, key, plain_aes, aes_key_type);
-    assert(imported_aes > 0);
+    {
+        // import aes
+        auto plain_key = std::vector<char>();
+        plain_key.resize(32);
+        plain_key[24] = 42;
+        auto imported_key = import_key(fl, session, wrap_key, plain_key, secret_key_class, aes_key_type);
+        assert(imported_key > 0);
+        // export
+        auto exported_key = export_key(fl, session, wrap_key, imported_key);
+        assert(exported_key == plain_key);
+        //std::cout << to_hex(exported_key) << std::endl;
+    }
 
-    // export
-    auto exported_key = export_secret(fl, session, key, imported_key);
-    assert(exported_key == plain_key);
-    auto exported_aes = export_secret(fl, session, key, imported_aes);
-    assert(exported_aes == plain_aes);
-
+    {
+        // import rsa
+        auto plain_key = generate_rsa(2048);
+        auto imported_key = import_key(fl, session, wrap_key, plain_key, private_key_class, rsa_key_type);
+        assert(imported_key > 0);
+        // export
+        auto exported_key = export_key(fl, session, wrap_key, imported_key);
+        assert(exported_key == plain_key);
+        //std::cout << stringify_rsa(plain_key) << std::endl;
+    }
+ 
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
     assert(CKR_OK == err_close_session);
