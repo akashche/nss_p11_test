@@ -23,6 +23,8 @@
 
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
+#include <botan/dh.h>
+#include <botan/dsa.h>
 #include <botan/ecdsa.h>
 #include <botan/pkcs8.h>
 #include <botan/rsa.h>
@@ -35,8 +37,11 @@ static CK_KEY_TYPE aes_key_type = CKK_AES;
 static CK_KEY_TYPE generic_secret_type = CKK_GENERIC_SECRET;
 static CK_KEY_TYPE rsa_key_type = CKK_RSA;
 static CK_KEY_TYPE ec_key_type = CKK_EC;
+static CK_KEY_TYPE dsa_key_type = CKK_DSA;
+static CK_KEY_TYPE dh_key_type = CKK_X9_42_DH;
 static CK_ULONG aes_256_bytes = 256 >> 3;
 static CK_BBOOL sign_true = CK_TRUE;
+static CK_ULONG zero = 0;
 
 const std::array<char, 16> symbols = {
     {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
@@ -219,10 +224,7 @@ static CK_OBJECT_HANDLE import_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE se
     templ.emplace_back(create_attr(CKA_CLASS, std::addressof(imp_key_class), sizeof(imp_key_class)));
     templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(imp_key_type), sizeof(imp_key_type)));
     templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
-    if (ec_key_type == imp_key_type) {
-        CK_ULONG zero = 0;
-        templ.emplace_back(create_attr(CKA_NSS_DB, std::addressof(zero), sizeof(zero)));
-    }
+    templ.emplace_back(create_attr(CKA_NSS_DB, std::addressof(zero), sizeof(zero)));
 
     CK_OBJECT_HANDLE key_hadle = -1;
     CK_RV err_unwrap = fl->C_UnwrapKey(
@@ -280,6 +282,30 @@ static std::vector<char> generate_ecdsa() {
     Botan::AutoSeeded_RNG rng;
     Botan::EC_Group ec_group("secp521r1");
     Botan::ECDSA_PrivateKey key(rng, ec_group);
+    auto sec_vec = Botan::PKCS8::BER_encode(key);
+    auto vec = Botan::unlock(sec_vec);
+    auto res = std::vector<char>();
+    res.resize(vec.size());
+    std::memcpy(res.data(), vec.data(), vec.size());
+    return res;
+}
+
+static std::vector<char> generate_dsa() {
+    Botan::AutoSeeded_RNG rng;
+    Botan::DL_Group dl_group("modp/ietf/3072");
+    Botan::DSA_PrivateKey key(rng, dl_group);
+    auto sec_vec = Botan::PKCS8::BER_encode(key);
+    auto vec = Botan::unlock(sec_vec);
+    auto res = std::vector<char>();
+    res.resize(vec.size());
+    std::memcpy(res.data(), vec.data(), vec.size());
+    return res;
+}
+
+static std::vector<char> generate_dh() {
+    Botan::AutoSeeded_RNG rng;
+    Botan::DL_Group dl_group("modp/ietf/3072");
+    Botan::DH_PrivateKey key(rng, dl_group);
     auto sec_vec = Botan::PKCS8::BER_encode(key);
     auto vec = Botan::unlock(sec_vec);
     auto res = std::vector<char>();
@@ -388,7 +414,6 @@ int main(int argc, char** argv) {
         // export
         auto exported_key = export_key(fl, session, wrap_key, imported_key);
         assert(exported_key == plain_key);
-        //std::cout << stringify_rsa(plain_key) << std::endl;
     }
 
     {
@@ -401,6 +426,23 @@ int main(int argc, char** argv) {
         assert(exported_key.size() > 0);
         assert(exported_key != plain_key);
         //std::cout << to_hex(exported_key) << std::endl;
+    }
+
+    {
+        // import dsa
+        auto plain_key = generate_dsa();
+        auto imported_key = import_key(fl, session, wrap_key, plain_key, private_key_class, dsa_key_type);
+        assert(imported_key > 0);
+        // export
+        auto exported_key = export_key(fl, session, wrap_key, imported_key);
+        assert(exported_key == plain_key);
+    }
+
+    {
+        // import dh
+        auto plain_key = generate_dh();
+        //std::cout << stringify_pkcs8(plain_key) << std::endl;
+        //auto imported_key = import_key(fl, session, wrap_key, plain_key, private_key_class, dh_key_type);
     }
 
     // close session
