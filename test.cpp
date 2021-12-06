@@ -10,8 +10,12 @@
 #include <cstring>
 #include <array>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include <nss.h>
 #include <pkcs11.h>
@@ -19,6 +23,7 @@
 
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
+#include <botan/ecdsa.h>
 #include <botan/pkcs8.h>
 #include <botan/rsa.h>
 
@@ -29,6 +34,7 @@ static CK_OBJECT_CLASS private_key_class = CKO_PRIVATE_KEY;
 static CK_KEY_TYPE aes_key_type = CKK_AES;
 static CK_KEY_TYPE generic_secret_type = CKK_GENERIC_SECRET;
 static CK_KEY_TYPE rsa_key_type = CKK_RSA;
+static CK_KEY_TYPE ec_key_type = CKK_EC;
 static CK_ULONG aes_256_bytes = 256 >> 3;
 static CK_BBOOL sign_true = CK_TRUE;
 
@@ -44,6 +50,16 @@ static std::string to_hex(std::vector<char> vec) {
         res.push_back(symbols[static_cast<size_t> (uch & 0x0f)]);
     }
     return res;
+}
+
+std::filesystem::path current_executable_dir() {
+    auto exec = std::string();
+    exec.resize(4096);
+    ssize_t len = readlink("/proc/self/exe", exec.data(), exec.size());
+    assert(len > 0);
+    exec.resize(len);
+    auto path = std::filesystem::path(exec);
+    return path.parent_path();
 }
 
 static CK_FUNCTION_LIST_PTR get_function_list() {
@@ -203,6 +219,10 @@ static CK_OBJECT_HANDLE import_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE se
     templ.emplace_back(create_attr(CKA_CLASS, std::addressof(imp_key_class), sizeof(imp_key_class)));
     templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(imp_key_type), sizeof(imp_key_type)));
     templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
+    if (ec_key_type == imp_key_type) {
+        CK_ULONG zero = 0;
+        templ.emplace_back(create_attr(CKA_NSS_DB, std::addressof(zero), sizeof(zero)));
+    }
 
     CK_OBJECT_HANDLE key_hadle = -1;
     CK_RV err_unwrap = fl->C_UnwrapKey(
@@ -256,13 +276,40 @@ static std::vector<char> generate_rsa(size_t size_bits) {
     return res;
 }
 
-static std::string stringify_rsa(const std::vector<char>& rsa_key) {
+static std::vector<char> generate_ecdsa() {
+    Botan::AutoSeeded_RNG rng;
+    Botan::EC_Group ec_group("secp521r1");
+    Botan::ECDSA_PrivateKey key(rng, ec_group);
+    auto sec_vec = Botan::PKCS8::BER_encode(key);
+    auto vec = Botan::unlock(sec_vec);
+    auto res = std::vector<char>();
+    res.resize(vec.size());
+    std::memcpy(res.data(), vec.data(), vec.size());
+    return res;
+}
+
+static std::string stringify_pkcs8(const std::vector<char>& key_in) {
     auto vec = std::vector<uint8_t>();
-    vec.resize(rsa_key.size());
-    std::memcpy(vec.data(), rsa_key.data(), rsa_key.size());
+    vec.resize(key_in.size());
+    std::memcpy(vec.data(), key_in.data(), key_in.size());
     Botan::DataSource_Memory mem(vec);
     auto key = Botan::PKCS8::load_key(mem);
     return Botan::PKCS8::PEM_encode(*key);
+}
+
+static std::vector<char> read_file(const std::string& rel_path) {
+    auto dir = current_executable_dir();
+    auto file = dir / rel_path;
+    std::ifstream ifs(file, std::fstream::binary); 
+    auto res = std::vector<char>((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
+    return res;
+}
+
+static void write_file(const std::string& rel_path, const std::vector<char>& data) {
+    auto dir = current_executable_dir();
+    auto file = dir / rel_path;
+    std::ofstream ofs(file, std::fstream::binary); 
+    ofs.write(data.data(), data.size());
 }
 
 int main(int argc, char** argv) {
@@ -343,7 +390,19 @@ int main(int argc, char** argv) {
         assert(exported_key == plain_key);
         //std::cout << stringify_rsa(plain_key) << std::endl;
     }
- 
+
+    {
+        // import ecdsa
+        auto plain_key = generate_ecdsa();
+        auto imported_key = import_key(fl, session, wrap_key, plain_key, private_key_class, ec_key_type);
+        assert(imported_key > 0);
+        // export
+        auto exported_key = export_key(fl, session, wrap_key, imported_key);
+        assert(exported_key.size() > 0);
+        assert(exported_key != plain_key);
+        //std::cout << to_hex(exported_key) << std::endl;
+    }
+
     // close session
     CK_RV err_close_session = fl->C_CloseSession(session);
     assert(CKR_OK == err_close_session);
