@@ -13,6 +13,7 @@
 #include <fstream>
 #include <filesystem>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <unistd.h>
@@ -33,6 +34,7 @@
 
 static CK_OBJECT_CLASS secret_key_class = CKO_SECRET_KEY; 
 static CK_OBJECT_CLASS private_key_class = CKO_PRIVATE_KEY; 
+static CK_OBJECT_CLASS public_key_class = CKO_PUBLIC_KEY; 
 static CK_KEY_TYPE aes_key_type = CKK_AES;
 static CK_KEY_TYPE generic_secret_type = CKK_GENERIC_SECRET;
 static CK_KEY_TYPE rsa_key_type = CKK_RSA;
@@ -40,19 +42,22 @@ static CK_KEY_TYPE ec_key_type = CKK_EC;
 static CK_KEY_TYPE dsa_key_type = CKK_DSA;
 static CK_KEY_TYPE dh_key_type = CKK_X9_42_DH;
 static CK_ULONG aes_256_bytes = 256 >> 3;
-static CK_BBOOL sign_true = CK_TRUE;
+static CK_BBOOL ck_true = CK_TRUE;
 static CK_ULONG zero = 0;
+static std::vector<CK_BYTE> ec_params_sec256 = {0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07};
+
 
 const std::array<char, 16> symbols = {
     {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
 
 
-static std::string to_hex(std::vector<char> vec) {
+static std::string to_hex(std::vector<char> vec, const std::string& spacer="") {
     auto res = std::string();
     for (char ch : vec) {
         unsigned char uch = static_cast<unsigned char> (ch);
         res.push_back(symbols[static_cast<size_t> (uch >> 4)]);
         res.push_back(symbols[static_cast<size_t> (uch & 0x0f)]);
+        res += spacer;
     }
     return res;
 }
@@ -223,8 +228,19 @@ static CK_OBJECT_HANDLE import_key(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE se
     auto templ = std::vector<CK_ATTRIBUTE>();
     templ.emplace_back(create_attr(CKA_CLASS, std::addressof(imp_key_class), sizeof(imp_key_class)));
     templ.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(imp_key_type), sizeof(imp_key_type)));
-    templ.emplace_back(create_attr(CKA_SIGN, std::addressof(sign_true), sizeof(sign_true)));
-    templ.emplace_back(create_attr(CKA_NSS_DB, std::addressof(zero), sizeof(zero)));
+    templ.emplace_back(create_attr(CKA_SIGN, std::addressof(ck_true), sizeof(ck_true)));
+
+    // https://dev-tech-crypto.mozilla.narkive.com/41uraGyV/how-should-i-handle-cka-netscape-db-for-gost-private-keys
+    auto pub_key = std::vector<char>();
+    if (CKK_EC == imp_key_type) {
+        pub_key.resize(plain_key.size() - 73);
+        // https://superuser.com/a/1465498
+        assert(65 == pub_key.size());
+        std:memcpy(pub_key.data(), plain_key.data() + 73, pub_key.size());
+        templ.emplace_back(create_attr(CKA_NSS_DB, pub_key.data(), pub_key.size()));
+    } else {
+        templ.emplace_back(create_attr(CKA_NSS_DB, std::addressof(zero), 1));
+    }
 
     CK_OBJECT_HANDLE key_hadle = -1;
     CK_RV err_unwrap = fl->C_UnwrapKey(
@@ -278,9 +294,9 @@ static std::vector<char> generate_rsa(size_t size_bits) {
     return res;
 }
 
-static std::vector<char> generate_ecdsa() {
+static std::vector<char> generate_ecdsa(const std::string& curve="secp256r1") {
     Botan::AutoSeeded_RNG rng;
-    Botan::EC_Group ec_group("secp521r1");
+    Botan::EC_Group ec_group(curve);
     Botan::ECDSA_PrivateKey key(rng, ec_group);
     auto sec_vec = Botan::PKCS8::BER_encode(key);
     auto vec = Botan::unlock(sec_vec);
@@ -336,6 +352,55 @@ static void write_file(const std::string& rel_path, const std::vector<char>& dat
     auto file = dir / rel_path;
     std::ofstream ofs(file, std::fstream::binary); 
     ofs.write(data.data(), data.size());
+}
+
+static std::tuple<CK_OBJECT_HANDLE, CK_OBJECT_HANDLE> 
+generate_ec_pair(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session) {
+    CK_MECHANISM mech;
+    std::memset(std::addressof(mech), '\0', sizeof(mech));
+    mech.mechanism = CKM_EC_KEY_PAIR_GEN;
+
+    auto templ_pub = std::vector<CK_ATTRIBUTE>();
+    templ_pub.emplace_back(create_attr(CKA_CLASS, std::addressof(public_key_class), sizeof(public_key_class)));
+    templ_pub.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(ec_key_type), sizeof(ec_key_type)));
+    templ_pub.emplace_back(create_attr(CKA_EC_PARAMS, ec_params_sec256.data(), ec_params_sec256.size()));
+
+    auto templ_priv = std::vector<CK_ATTRIBUTE>();
+    templ_pub.emplace_back(create_attr(CKA_CLASS, std::addressof(private_key_class), sizeof(private_key_class)));
+    templ_pub.emplace_back(create_attr(CKA_KEY_TYPE, std::addressof(ec_key_type), sizeof(ec_key_type)));
+
+    CK_OBJECT_HANDLE key_pub = -1;
+    CK_OBJECT_HANDLE key_priv = -1;
+    CK_RV err_gen = fl->C_GenerateKeyPair(
+            session,
+            std::addressof(mech), 
+            templ_pub.data(),
+            static_cast<CK_ULONG>(templ_pub.size()),
+            templ_priv.data(),
+            static_cast<CK_ULONG>(templ_priv.size()),
+            std::addressof(key_pub),
+            std::addressof(key_priv));
+    assert(CKR_OK == err_gen);
+    return { key_pub, key_priv };
+}
+
+static void get_attribute(CK_FUNCTION_LIST_PTR fl, CK_SESSION_HANDLE session,
+        CK_OBJECT_HANDLE obj, CK_ATTRIBUTE_TYPE attr) {
+    
+    auto vec = std::vector<char>();
+    vec.resize(16);
+    auto att = create_attr(attr, vec.data(), vec.size());
+    auto templ = std::vector<CK_ATTRIBUTE>();
+    templ.emplace_back(att);
+    
+    CK_RV err = fl->C_GetAttributeValue(
+            session,
+            obj,
+            templ.data(),
+            static_cast<CK_ULONG>(templ.size()));
+    //assert(CKR_OK == err);
+    std::cout << err << std::endl;
+    std::cout << to_hex(vec) << std::endl;        
 }
 
 int main(int argc, char** argv) {
@@ -423,9 +488,7 @@ int main(int argc, char** argv) {
         assert(imported_key > 0);
         // export
         auto exported_key = export_key(fl, session, wrap_key, imported_key);
-        assert(exported_key.size() > 0);
-        assert(exported_key != plain_key);
-        //std::cout << to_hex(exported_key) << std::endl;
+        assert(exported_key == plain_key);
     }
 
     {
@@ -443,6 +506,16 @@ int main(int argc, char** argv) {
         auto plain_key = generate_dh();
         //std::cout << stringify_pkcs8(plain_key) << std::endl;
         //auto imported_key = import_key(fl, session, wrap_key, plain_key, private_key_class, dh_key_type);
+    }
+
+    {
+        // generate ec
+        auto [pub, priv] = generate_ec_pair(fl, session);
+        //get_attribute(fl, session, priv, CKA_EC_PARAMS);
+        //auto exported_pub = export_key(fl, session, wrap_key, pub);
+        //write_file("exported_ec_pub.der", exported_pub);
+        auto exported_priv = export_key(fl, session, wrap_key, priv);
+        //write_file("ec_nss.der", exported_priv);
     }
 
     // close session
